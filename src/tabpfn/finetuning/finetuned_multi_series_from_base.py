@@ -67,7 +67,10 @@ from tabpfn.finetuning.data_util import (
     get_preprocessed_dataset_chunks,
     meta_dataset_collator,
 )
-from tabpfn.finetuning.logging import FinetuningLogger, NullLogger, FinetunedTabPFNRegressor
+from tabpfn.finetuning.logging import FinetuningLogger, NullLogger 
+
+from tabpfn.finetuning import FinetunedTabPFNRegressor
+
 from tabpfn.finetuning.train_util import (
     get_and_init_optimizer,
     get_checkpoint_path_and_epoch_from_output_dir,
