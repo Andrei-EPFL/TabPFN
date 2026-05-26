@@ -68,7 +68,7 @@ from tabpfn.utils import infer_random_state
 from tabpfn.validation import ensure_compatible_fit_inputs_sklearn
 
 # Import the concrete regressor we're extending
-from finetuned_regressor import FinetunedTabPFNRegressor  # noqa: E402
+from tabpfn.finetuning.finetuned_regressor import FinetunedTabPFNRegressor  # noqa: E402
 
 logger = logging.getLogger(__name__)
 
