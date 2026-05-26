@@ -4,7 +4,7 @@ from tabpfn.finetuning.data_util import ClassifierBatch, RegressorBatch
 from tabpfn.finetuning.finetuned_base import EvalResult, FinetunedTabPFNBase
 from tabpfn.finetuning.finetuned_classifier import FinetunedTabPFNClassifier
 from tabpfn.finetuning.finetuned_regressor import FinetunedTabPFNRegressor
-from tabpfn.finetuning.finetuned_multi_series import MultiSeriesFinetunedTabPFNRegressor
+from tabpfn.finetuning.finetuned_multi_series_from_base import MultiSeriesFinetunedTabPFNRegressor
 from tabpfn.finetuning.logging import FinetuningLogger, NullLogger, WandbLogger
 
 __all__ = [
