@@ -56,6 +56,7 @@ from sklearn.metrics import mean_squared_error
 from sklearn.model_selection import train_test_split
 from torch.nn.utils import clip_grad_norm_
 from torch.utils.data import DataLoader
+from torch.optim.lr_scheduler import LambdaLR
 
 from tqdm.auto import tqdm
 
@@ -121,9 +122,7 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
         self,
         X_list: list[XType],
         y_list: list[YType],
-        X_val_list: list[XType] | None = None,
-        y_val_list: list[YType] | None = None,
-        output_dir: Path | None = None,
+        output_dir: Path | None = None
     ) -> "MultiSeriesFinetunedTabPFNRegressor":
         """Fine-tune on multiple time-series tables.
 
@@ -146,15 +145,6 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
                 f"X_list and y_list must have the same length, "
                 f"got {len(X_list)} and {len(y_list)}."
             )
-        if (X_val_list is None) != (y_val_list is None):
-            raise ValueError(
-                "X_val_list and y_val_list must both be provided or both be None."
-            )
-        if X_val_list is not None and len(X_val_list) != len(X_list):
-            raise ValueError(
-                "X_val_list must have the same length as X_list, "
-                f"got {len(X_val_list)} and {len(X_list)}."
-            )
 
         if output_dir is None:
             warnings.warn(
@@ -168,8 +158,6 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
         return self._fit_multi(
             X_list=X_list,
             y_list=y_list,
-            X_val_list=X_val_list,
-            y_val_list=y_val_list,
             output_dir=output_dir,
         )
 
@@ -181,8 +169,6 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
         self,
         X_list: list[XType],
         y_list: list[YType],
-        X_val_list: list[XType] | None,
-        y_val_list: list[YType] | None,
         output_dir: Path | None,
     ) -> "MultiSeriesFinetunedTabPFNRegressor":
         """Core multi-series fine-tuning loop."""
@@ -201,9 +187,6 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
             )
             _logger = NullLogger()
 
-        # Store the original training size for checkpoint naming
-        train_size = X.shape[0]
-        print("train_size", train_size)
         start_time = time.monotonic()
 
         _estimator_kwargs = copy.deepcopy(self._estimator_kwargs)
@@ -230,32 +213,38 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
             base_estimator_config,
             self.n_estimators_validation,
         )
-        final_inference_eval_config = self._build_eval_config(
-            base_estimator_config,
-            self.n_estimators_final_inference,
-        )
+        # final_inference_eval_config = self._build_eval_config(
+        #     base_estimator_config,
+        #     self.n_estimators_final_inference,
+        # )
 
        
         eval_devices = infer_devices(self.device)
         validation_eval_config["device"] = eval_devices
-        final_inference_eval_config["device"] = eval_devices
+        # final_inference_eval_config["device"] = eval_devices
+
+
+        # X, y = X_list[0], y_list[0]
+        # # Store the original training size for checkpoint naming
+        # train_size = X.shape[0]
+        # print("train_size", train_size)
 
         epoch_to_start_from = 0
         checkpoint_path = None
-        if output_dir is not None:
-            checkpoint_path, epoch_to_start_from = (
-                get_checkpoint_path_and_epoch_from_output_dir(
-                    output_dir=output_dir,
-                    train_size=train_size,
-                    get_best=False,
-                )
-            )
-            if checkpoint_path is not None:
-                logger.info(
-                    f"Restarting training from checkpoint {checkpoint_path} at epoch "
-                    f"{epoch_to_start_from}",
-                )
-                finetuning_estimator_config["model_path"] = checkpoint_path
+        # if output_dir is not None:
+        #     checkpoint_path, epoch_to_start_from = (
+        #         get_checkpoint_path_and_epoch_from_output_dir(
+        #             output_dir=output_dir,
+        #             train_size=train_size,
+        #             get_best=False,
+        #         )
+        #     )
+        #     if checkpoint_path is not None:
+        #         logger.info(
+        #             f"Restarting training from checkpoint {checkpoint_path} at epoch "
+        #             f"{epoch_to_start_from}",
+        #         )
+        #         finetuning_estimator_config["model_path"] = checkpoint_path
 
         self.finetuned_estimator_ = self._create_estimator(finetuning_estimator_config)
         self._setup_estimator()
@@ -270,7 +259,6 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
             use_chunkwise_inference=False,
         )
 
-        # --- DDP model wrapping ---
         model_for_optimization = self.finetuned_estimator_.model_
 
 
@@ -285,30 +273,22 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
         use_amp = self.device.startswith("cuda") and torch.cuda.is_available()
         scaler = GradScaler() if use_amp else None  # type: ignore
 
-  
-        X, y = X_list[0], y_list[0]
-        X_validated, y_validated, self.feature_names_in_, self.n_features_in_ = (
-            ensure_compatible_fit_inputs_sklearn(
-                X,
-                y,
-                estimator=self.finetuned_estimator_,
-                ensure_y_numeric=self._model_type == "regressor",
-            )
-        )
-        self.X_ = X
-        self.y_ = y
-        X, y = X_validated, y_validated
+      
+        
+        # X_validated, y_validated, self.feature_names_in_, self.n_features_in_ = (
+        #     ensure_compatible_fit_inputs_sklearn(
+        #         X,
+        #         y,
+        #         estimator=self.finetuned_estimator_,
+        #         ensure_y_numeric=self._model_type == "regressor",
+        #     )
+        # )
+        # self.X_ = X
+        # self.y_ = y
+        # X, y = X_validated, y_validated
 
-        if X_val is not None and y_val is not None:
-            X_train, y_train = X, y
-            X_val, y_val, _, _ = ensure_compatible_fit_inputs_sklearn(
-                X_val,
-                y_val,
-                estimator=self.finetuned_estimator_,
-                ensure_y_numeric=self._model_type == "regressor",
-            )
-        else:
-            X_train, X_val, y_train, y_val = self._get_train_val_split(X, y)
+        
+        # X_train, X_val, y_train, y_val = self._get_train_val_split(X, y)
 
 
         # # --- Initial eval (rank 0 only) ---
@@ -323,7 +303,11 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
         # self._log_epoch_evaluation(-1, eval_result, mean_train_loss=None)
         # best_metric: float = eval_result.primary
 
-
+        # n_finetune_ctx_plus_query_samples = min(
+        #     self.n_finetune_ctx_plus_query_samples,
+        #     len(y_train),
+        # )
+        
         static_seed, rng = infer_random_state(self.random_state)
         preprocessing_random_state = (
             static_seed if self.use_fixed_preprocessing_seed else rng
@@ -337,16 +321,16 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
 
         start_time = time.monotonic()
 
-        finetuning_query_size = self._get_valid_finetuning_query_size(
-            query_size=int(
-                n_finetune_ctx_plus_query_samples * self.finetune_ctx_query_split_ratio
-            ),
-            y_train=y_train,
-        )
+        # finetuning_query_size = self._get_valid_finetuning_query_size(
+        #     query_size=int(
+        #         n_finetune_ctx_plus_query_samples * self.finetune_ctx_query_split_ratio
+        #     ),
+        #     y_train=y_train,
+        # )
 
-        print("n_finetune", n_finetune_ctx_plus_query_samples)
-        print("finetune", self.finetune_ctx_query_split_ratio)
-        print("finetuning_query_size", finetuning_query_size)
+        # print("n_finetune", n_finetune_ctx_plus_query_samples)
+        print("self.finetune", self.finetune_ctx_query_split_ratio)
+        # print("finetuning_query_size", finetuning_query_size)
         for epoch in range(epoch_to_start_from, self.epochs):
             # Per-epoch aggregates for cleaner learning curves.
             epoch_loss_sum = 0.0
@@ -356,31 +340,23 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
             global_batch = 0
             accumulated_loss = torch.tensor(0.0, device=self.device)
             
-            for X, y in zip(X_list, y_list):
+            for X_i, y_i in zip(X_list, y_list):
 
                 X_validated, y_validated, self.feature_names_in_, self.n_features_in_ = (
                     ensure_compatible_fit_inputs_sklearn(
-                        X,
-                        y,
+                        X_i,
+                        y_i,
                         estimator=self.finetuned_estimator_,
                         ensure_y_numeric=self._model_type == "regressor",
                     )
                 )
-                self.X_ = X
-                self.y_ = y
+                self.X_ = X_i
+                self.y_ = y_i
                 X, y = X_validated, y_validated
-                print("validate X and y shapes", X.shape, y.shape)
+                print("general X and y shapes", X.shape, y.shape)
 
-                if X_val is not None and y_val is not None:
-                    X_train, y_train = X, y
-                    X_val, y_val, _, _ = ensure_compatible_fit_inputs_sklearn(
-                        X_val,
-                        y_val,
-                        estimator=self.finetuned_estimator_,
-                        ensure_y_numeric=self._model_type == "regressor",
-                    )
-                else:
-                    X_train, X_val, y_train, y_val = self._get_train_val_split(X, y)
+               
+                X_train, X_val, y_train, y_val = self._get_train_val_split(X, y)
 
                 print("train:", X_train.shape, "validation", X_val.shape)
 
@@ -390,6 +366,13 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
                 n_finetune_ctx_plus_query_samples = min(
                     self.n_finetune_ctx_plus_query_samples,
                     len(y_train),
+                )
+
+                finetuning_query_size = self._get_valid_finetuning_query_size(
+                   query_size=int(
+                        n_finetune_ctx_plus_query_samples * self.finetune_ctx_query_split_ratio
+                    ),
+                    y_train=y_train,
                 )
             
                 # Regenerate datasets each epoch with a different random_state
@@ -486,7 +469,7 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
                 
                 global_batch += 1
                 
-                is_accum_step = (global_batch % self.n_accum_loss == 0)
+                is_accum_step = (global_batch % self.n_draw_accum == 0)
                 is_last_batch = (global_batch == len(X_list))  # see note below
 
                 if is_accum_step or is_last_batch:
@@ -571,81 +554,81 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
             
 
 
-            if (
-                output_dir is not None
-                and not np.isnan(primary_metric)
-            ):
-                save_interval_checkpoint = (
-                    self.save_checkpoint_interval is not None
-                    and (epoch + 1) % self.save_checkpoint_interval == 0
-                )
+        #     if (
+        #         output_dir is not None
+        #         and not np.isnan(primary_metric)
+        #     ):
+        #         save_interval_checkpoint = (
+        #             self.save_checkpoint_interval is not None
+        #             and (epoch + 1) % self.save_checkpoint_interval == 0
+        #         )
 
-                is_best = self._is_improvement(primary_metric, best_metric)
+        #         is_best = self._is_improvement(primary_metric, best_metric)
 
-                if save_interval_checkpoint or is_best:
-                    save_checkpoint(
-                        estimator=self.finetuned_estimator_,
-                        output_dir=output_dir,
-                        epoch=epoch + 1,
-                        optimizer=optimizer,
-                        metrics=self._get_checkpoint_metrics(eval_result),
-                        train_size=train_size,
-                        is_best=is_best,
-                        save_interval_checkpoint=save_interval_checkpoint,
-                    )
+        #         if save_interval_checkpoint or is_best:
+        #             save_checkpoint(
+        #                 estimator=self.finetuned_estimator_,
+        #                 output_dir=output_dir,
+        #                 epoch=epoch + 1,
+        #                 optimizer=optimizer,
+        #                 metrics=self._get_checkpoint_metrics(eval_result),
+        #                 train_size=train_size,
+        #                 is_best=is_best,
+        #                 save_interval_checkpoint=save_interval_checkpoint,
+        #             )
 
-            if self.early_stopping and not np.isnan(primary_metric):
-                if self._is_improvement(primary_metric, best_metric):
-                    best_metric = primary_metric
-                    patience_counter = 0
-                    model_sd = self.finetuned_estimator_.model_.state_dict()
-                    best_model_state = {
-                        k: v.detach().cpu().clone() for k, v in model_sd.items()
-                    }
-                else:
-                    patience_counter += 1
-                    logger.info(
-                        "⚠️  No improvement for %s epochs. Best %s: %.4f",
-                        patience_counter,
-                        self._metric_name,
-                        best_metric,
-                    )
+        #     if self.early_stopping and not np.isnan(primary_metric):
+        #         if self._is_improvement(primary_metric, best_metric):
+        #             best_metric = primary_metric
+        #             patience_counter = 0
+        #             model_sd = self.finetuned_estimator_.model_.state_dict()
+        #             best_model_state = {
+        #                 k: v.detach().cpu().clone() for k, v in model_sd.items()
+        #             }
+        #         else:
+        #             patience_counter += 1
+        #             logger.info(
+        #                 "⚠️  No improvement for %s epochs. Best %s: %.4f",
+        #                 patience_counter,
+        #                 self._metric_name,
+        #                 best_metric,
+        #             )
 
-                if patience_counter >= self.early_stopping_patience:
-                    logger.info(
-                        "🛑 Early stopping triggered. Best %s: %.4f",
-                        self._metric_name,
-                        best_metric,
-                    )
-                    if best_model_state is not None:
-                        self.finetuned_estimator_.model_.load_state_dict(
-                            best_model_state
-                        )
-                    break
+        #         if patience_counter >= self.early_stopping_patience:
+        #             logger.info(
+        #                 "🛑 Early stopping triggered. Best %s: %.4f",
+        #                 self._metric_name,
+        #                 best_metric,
+        #             )
+        #             if best_model_state is not None:
+        #                 self.finetuned_estimator_.model_.load_state_dict(
+        #                     best_model_state
+        #                 )
+        #             break
 
-            if self.time_limit is not None:
-                elapsed_time = time.monotonic() - start_time
-                if elapsed_time > self.time_limit:
-                    logger.info(
-                        "🛑 Time limit of %d seconds reached. Stopping training.",
-                        self.time_limit,
-                    )
-                    break
+        #     if self.time_limit is not None:
+        #         elapsed_time = time.monotonic() - start_time
+        #         if elapsed_time > self.time_limit:
+        #             logger.info(
+        #                 "🛑 Time limit of %d seconds reached. Stopping training.",
+        #                 self.time_limit,
+        #             )
+        #             break
 
-                n_epochs_run = epoch + 1 - epoch_to_start_from
-                if elapsed_time + (elapsed_time / n_epochs_run) > self.time_limit:
-                    logger.info(
-                        "🛑 Not enough time remaining for another epoch. "
-                        "Stopping training.",
-                    )
-                    break
+        #         n_epochs_run = epoch + 1 - epoch_to_start_from
+        #         if elapsed_time + (elapsed_time / n_epochs_run) > self.time_limit:
+        #             logger.info(
+        #                 "🛑 Not enough time remaining for another epoch. "
+        #                 "Stopping training.",
+        #             )
+        #             break
 
-        if self.early_stopping and best_model_state is not None:
-            self.finetuned_estimator_.model_.load_state_dict(best_model_state)
+        # if self.early_stopping and best_model_state is not None:
+        #     self.finetuned_estimator_.model_.load_state_dict(best_model_state)
 
         _logger.finish()
         logger.info("--- ✅ Fine-tuning Finished ---")
-        self._setup_inference_model(final_inference_eval_config)
+        # self._setup_inference_model(final_inference_eval_config)
 
         self.is_fitted_ = True
         return self
