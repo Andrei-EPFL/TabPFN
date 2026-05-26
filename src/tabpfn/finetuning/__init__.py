@@ -1,11 +1,10 @@
 #  Copyright (c) Prior Labs GmbH 2026.
 
-"""Single-dataset fine-tuning wrappers for TabPFN models."""
-
 from tabpfn.finetuning.data_util import ClassifierBatch, RegressorBatch
 from tabpfn.finetuning.finetuned_base import EvalResult, FinetunedTabPFNBase
 from tabpfn.finetuning.finetuned_classifier import FinetunedTabPFNClassifier
 from tabpfn.finetuning.finetuned_regressor import FinetunedTabPFNRegressor
+from tabpfn.finetuning.finetuned_multi_series import MultiSeriesFinetunedTabPFNRegressor
 from tabpfn.finetuning.logging import FinetuningLogger, NullLogger, WandbLogger
 
 __all__ = [
@@ -14,6 +13,7 @@ __all__ = [
     "FinetunedTabPFNBase",
     "FinetunedTabPFNClassifier",
     "FinetunedTabPFNRegressor",
+    "MultiSeriesFinetunedTabPFNRegressor",
     "FinetuningLogger",
     "NullLogger",
     "RegressorBatch",
