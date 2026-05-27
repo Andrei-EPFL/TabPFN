@@ -48,7 +48,7 @@ import warnings
 from functools import partial
 from itertools import cycle
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, TYPE_CHECKING
 
 import numpy as np
 import torch
@@ -70,7 +70,7 @@ from tabpfn.finetuning.data_util import (
 )
 from tabpfn.finetuning.logging import FinetuningLogger, NullLogger 
 
-from tabpfn.finetuning import FinetunedTabPFNRegressor
+from tabpfn.finetuning import FinetunedTabPFNRegressor, EvalResult
 
 from tabpfn.finetuning.train_util import (
     get_and_init_optimizer,
@@ -82,6 +82,9 @@ from tabpfn.utils import infer_devices, infer_random_state
 from tabpfn.validation import ensure_compatible_fit_inputs_sklearn
 
 logger = logging.getLogger(__name__)
+
+if TYPE_CHECKING:
+    from tabpfn.constants import XType, YType
 
 # Re-export MAX_VALIDATION_SAMPLES from base
 MAX_VALIDATION_SAMPLES = 50_000
@@ -114,6 +117,8 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
     ) -> None:
         super().__init__(**kwargs)
         self.n_draw_accum = n_draw_accum
+        self.train_epoch_losses= []
+        self.validation_epoch_losses= []
     # ------------------------------------------------------------------
     # Public multi-series entry-point
     # ------------------------------------------------------------------
@@ -122,6 +127,8 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
         self,
         X_list: list[XType],
         y_list: list[YType],
+        X_val_list: list[XType] | None = None,
+        y_val_list: list[YType] | None = None,
         output_dir: Path | None = None
     ) -> "MultiSeriesFinetunedTabPFNRegressor":
         """Fine-tune on multiple time-series tables.
@@ -145,7 +152,12 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
                 f"X_list and y_list must have the same length, "
                 f"got {len(X_list)} and {len(y_list)}."
             )
-
+        
+        if (X_val_list is None) != (y_val_list is None):
+            raise ValueError(
+                "X_val_list and y_val_list must both be provided or both be None."
+            )
+        
         if output_dir is None:
             warnings.warn(
                 "`output_dir` is not set.  No checkpointing will be done.",
@@ -158,7 +170,9 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
         return self._fit_multi(
             X_list=X_list,
             y_list=y_list,
-            output_dir=output_dir,
+            X_val_list=X_val_list,
+            y_val_list=y_val_list,
+            output_dir=output_dir
         )
 
     # ------------------------------------------------------------------
@@ -169,7 +183,9 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
         self,
         X_list: list[XType],
         y_list: list[YType],
-        output_dir: Path | None,
+        X_val_list: list[XType] | None,
+        y_val_list: list[YType] | None,
+        output_dir: Path | None
     ) -> "MultiSeriesFinetunedTabPFNRegressor":
         """Core multi-series fine-tuning loop."""
         _logger = self.experiment_logger or NullLogger()
@@ -186,8 +202,6 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
                 exc_info=True,
             )
             _logger = NullLogger()
-
-        start_time = time.monotonic()
 
         _estimator_kwargs = copy.deepcopy(self._estimator_kwargs)
         model_path = _estimator_kwargs.pop("model_path", None)
@@ -213,38 +227,36 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
             base_estimator_config,
             self.n_estimators_validation,
         )
-        # final_inference_eval_config = self._build_eval_config(
-        #     base_estimator_config,
-        #     self.n_estimators_final_inference,
-        # )
+        final_inference_eval_config = self._build_eval_config(
+            base_estimator_config,
+            self.n_estimators_final_inference,
+        )
 
        
         eval_devices = infer_devices(self.device)
         validation_eval_config["device"] = eval_devices
-        # final_inference_eval_config["device"] = eval_devices
+        final_inference_eval_config["device"] = eval_devices
 
 
-        # X, y = X_list[0], y_list[0]
         # # Store the original training size for checkpoint naming
-        # train_size = X.shape[0]
-        # print("train_size", train_size)
+        train_size = len(X_list)
 
         epoch_to_start_from = 0
         checkpoint_path = None
-        # if output_dir is not None:
-        #     checkpoint_path, epoch_to_start_from = (
-        #         get_checkpoint_path_and_epoch_from_output_dir(
-        #             output_dir=output_dir,
-        #             train_size=train_size,
-        #             get_best=False,
-        #         )
-        #     )
-        #     if checkpoint_path is not None:
-        #         logger.info(
-        #             f"Restarting training from checkpoint {checkpoint_path} at epoch "
-        #             f"{epoch_to_start_from}",
-        #         )
-        #         finetuning_estimator_config["model_path"] = checkpoint_path
+        if output_dir is not None:
+            checkpoint_path, epoch_to_start_from = (
+                get_checkpoint_path_and_epoch_from_output_dir(
+                    output_dir=output_dir,
+                    train_size=train_size,
+                    get_best=False,
+                )
+            )
+            if checkpoint_path is not None:
+                logger.info(
+                    f"Restarting training from checkpoint {checkpoint_path} at epoch "
+                    f"{epoch_to_start_from}",
+                )
+                finetuning_estimator_config["model_path"] = checkpoint_path
 
         self.finetuned_estimator_ = self._create_estimator(finetuning_estimator_config)
         self._setup_estimator()
@@ -278,12 +290,8 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
         )
 
         logger.info("--- 🚀 Starting Fine-tuning ---")
-        patience_counter = 0
-        best_model_state: dict[str, torch.Tensor] | None = None
 
         scheduler: LambdaLR | None = None
-
-        start_time = time.monotonic()
 
         logger.debug(f"DEBUG: self.finetune_ctx_query_split_ratio={self.finetune_ctx_query_split_ratio}")
         logger.debug(f"DEBUG: self.n_finetune_ctx_plus_query_samples={self.n_finetune_ctx_plus_query_samples}")
@@ -411,7 +419,6 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
                         performance_options=finetuning_performance_options,
                     )
 
-
                     use_scaler = use_amp and scaler is not None
 
                     with autocast(enabled=use_scaler), sdpa_kernel_context():  # type: ignore
@@ -477,22 +484,21 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
                 step=global_step,
             )
 
-                
-
             mean_train_loss = (
                 epoch_loss_sum / len(X_list)
             )
 
             # --- Validation ---
-            eval_result = self._evaluate_model(
+            eval_result = self._evaluate_model_multi(
                 validation_eval_config,
-                X_train,  # pyright: ignore[reportArgumentType]
-                y_train,  # pyright: ignore[reportArgumentType]
-                X_val,  # pyright: ignore[reportArgumentType]
-                y_val,  # pyright: ignore[reportArgumentType]
+                X_val_list,
+                y_val_list,
             )
+
+            self.train_epoch_losses.append(mean_train_loss)
+            self.validation_epoch_losses.append(eval_result.primary)
+
             self._log_epoch_evaluation(epoch, eval_result, mean_train_loss)
-            logger.info("Epoch %d/%d Validation loss was computed with the Series index %d/%d", epoch+1, self.epochs, idx_list+1, len(X_list))
 
             epoch_log_metrics: dict[str, float] = {
                 "train/epoch": epoch,
@@ -505,8 +511,6 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
             _logger.log_epoch(epoch_log_metrics, step=global_step)
 
             primary_metric = eval_result.primary
-            
-
 
             if (
                 output_dir is not None
@@ -526,129 +530,58 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
                         epoch=epoch + 1,
                         optimizer=optimizer,
                         metrics=self._get_checkpoint_metrics(eval_result),
-                        train_size=len(X_list),
+                        train_size=train_size,
                         is_best=is_best,
                         save_interval_checkpoint=save_interval_checkpoint,
                     )
 
-            # if self.early_stopping and not np.isnan(primary_metric):
-            #     if self._is_improvement(primary_metric, best_metric):
-            #         best_metric = primary_metric
-            #         patience_counter = 0
-            #         model_sd = self.finetuned_estimator_.model_.state_dict()
-            #         best_model_state = {
-            #             k: v.detach().cpu().clone() for k, v in model_sd.items()
-            #         }
-            #     else:
-            #         patience_counter += 1
-            #         logger.info(
-            #             "⚠️  No improvement for %s epochs. Best %s: %.4f",
-            #             patience_counter,
-            #             self._metric_name,
-            #             best_metric,
-            #         )
-
-            #     if patience_counter >= self.early_stopping_patience:
-            #         logger.info(
-            #             "🛑 Early stopping triggered. Best %s: %.4f",
-            #             self._metric_name,
-            #             best_metric,
-            #         )
-            #         if best_model_state is not None:
-            #             self.finetuned_estimator_.model_.load_state_dict(
-            #                 best_model_state
-            #             )
-            #         break
-
-            # if self.time_limit is not None:
-            #     elapsed_time = time.monotonic() - start_time
-            #     if elapsed_time > self.time_limit:
-            #         logger.info(
-            #             "🛑 Time limit of %d seconds reached. Stopping training.",
-            #             self.time_limit,
-            #         )
-            #         break
-
-            #     n_epochs_run = epoch + 1 - epoch_to_start_from
-            #     if elapsed_time + (elapsed_time / n_epochs_run) > self.time_limit:
-            #         logger.info(
-            #             "🛑 Not enough time remaining for another epoch. "
-            #             "Stopping training.",
-            #         )
-            #         break
-
-        # if self.early_stopping and best_model_state is not None:
-        #     self.finetuned_estimator_.model_.load_state_dict(best_model_state)
 
         _logger.finish()
         logger.info("--- ✅ Fine-tuning Finished ---")
-        # self._setup_inference_model(final_inference_eval_config)
+        self._setup_inference_model(final_inference_eval_config)
 
         self.is_fitted_ = True
         return self
 
 
-    # # ------------------------------------------------------------------
-    # # Multi-series evaluation helper
-    # # ------------------------------------------------------------------
+    # ------------------------------------------------------------------
+    # Multi-series evaluation helper
+    # ------------------------------------------------------------------
 
-    # def _evaluate_model_multi(
-    #     self,
-    #     eval_config: dict[str, Any],
-    #     X_trains: list[np.ndarray],
-    #     y_trains: list[np.ndarray],
-    #     X_vals: list[np.ndarray],
-    #     y_vals: list[np.ndarray],
-    # ) -> EvalResult:
-    #     """Evaluate on all series; return mean MSE as primary metric.
+    def _evaluate_model_multi(
+        self,
+        eval_config: dict[str, Any],
+        X_val_list: list[XType] | None,
+        y_val_list: list[YType] | None,
+    ) -> EvalResult:
+        """Evaluate on all series; return mean MSE as primary metric.
+        """
 
-    #     A separate ``TabPFNRegressor`` clone is fitted on *each* series and
-    #     scored on its corresponding validation split.  The reported MSE is the
-    #     mean over all series (macro average).
-    #     """
-    #     from tabpfn import TabPFNRegressor
+        loss_sum = 0
+        for idx_list, (X_i, y_i) in enumerate(zip(X_val_list, y_val_list)):
+            logger.debug("DEBUG: Validation: Series %d/%d", idx_list+1, len(X_val_list))
 
-    #     per_series_mse: list[float] = []
+            X_validated, y_validated, _, _ = (
+                ensure_compatible_fit_inputs_sklearn(
+                    X_i,
+                    y_i,
+                    estimator=self.finetuned_estimator_,
+                    ensure_y_numeric=self._model_type == "regressor",
+                )
+            )
+            logger.debug(f"DEBUG: Validation: X.shape={X_validated.shape}; y.shape={y_validated.shape}")
+            X_train, X_val, y_train, y_val = self._get_train_val_split(X_validated, y_validated)
+            
+            eval_result = self._evaluate_model(
+                eval_config,
+                X_train,  # pyright: ignore[reportArgumentType]
+                y_train,  # pyright: ignore[reportArgumentType]
+                X_val,  # pyright: ignore[reportArgumentType]
+                y_val,  # pyright: ignore[reportArgumentType]
+            )
 
-    #     for X_tr, y_tr, X_vl, y_vl in zip(X_trains, y_trains, X_vals, y_vals):
-    #         eval_reg = clone_model_for_evaluation(
-    #             self.finetuned_estimator_,
-    #             eval_config,
-    #             TabPFNRegressor,
-    #         )
-    #         eval_reg.fit(X_tr, y_tr)
-    #         try:
-    #             preds = eval_reg.predict(X_vl)
-    #             mse = mean_squared_error(y_vl, preds)
-    #         except (ValueError, RuntimeError, AttributeError) as exc:
-    #             logger.warning("Evaluation failed for a series: %s", exc)
-    #             mse = np.nan
-    #         per_series_mse.append(float(mse))
+            loss_sum += eval_result.primary
 
-    #     valid_mses = [m for m in per_series_mse if not np.isnan(m)]
-    #     mean_mse = float(np.mean(valid_mses)) if valid_mses else np.nan
-
-    #     secondary = {f"series_{i}_mse": v for i, v in enumerate(per_series_mse)}
-    #     return EvalResult(primary=mean_mse, secondary=secondary)
-
-    # # ------------------------------------------------------------------
-    # # Final inference model — fit on concatenated data by default
-    # # ------------------------------------------------------------------
-
-    # def _setup_inference_model_multi(
-    #     self, final_inference_eval_config: dict[str, Any]
-    # ) -> None:
-    #     """Fit the inference model on all series data concatenated."""
-    #     from tabpfn import TabPFNRegressor
-
-    #     X_all = np.concatenate(self._X_list_, axis=0)  # type: ignore[arg-type]
-    #     y_all = np.concatenate(self._y_list_, axis=0)  # type: ignore[arg-type]
-
-    #     finetuned_inference_regressor = clone_model_for_evaluation(
-    #         self.finetuned_estimator_,
-    #         final_inference_eval_config,
-    #         TabPFNRegressor,
-    #     )
-    #     self.finetuned_inference_regressor_ = finetuned_inference_regressor
-    #     self.finetuned_inference_regressor_.fit_mode = "fit_preprocessors"  # type: ignore
-    #     self.finetuned_inference_regressor_.fit(X_all, y_all)
+        mean_primary = loss_sum / len(X_val_list)
+    
+        return EvalResult(primary=mean_primary)
