@@ -183,8 +183,8 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
         self,
         X_list: list[XType],
         y_list: list[YType],
-        X_val_list: list[XType] | None,
-        y_val_list: list[YType] | None,
+        X_val_list: list[XType],
+        y_val_list: list[YType],
         output_dir: Path | None
     ) -> "MultiSeriesFinetunedTabPFNRegressor":
         """Core multi-series fine-tuning loop."""
@@ -462,7 +462,8 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
 
                     if scheduler is not None:
                         scheduler.step()
-
+                    
+                    optimizer.zero_grad()
                     accumulated_loss = torch.tensor(0.0, device=self.device)
 
                     global_step += 1
@@ -551,8 +552,8 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
     def _evaluate_model_multi(
         self,
         eval_config: dict[str, Any],
-        X_val_list: list[XType] | None,
-        y_val_list: list[YType] | None,
+        X_val_list: list[XType],
+        y_val_list: list[YType],
     ) -> EvalResult:
         """Evaluate on all series; return mean MSE as primary metric.
         """
