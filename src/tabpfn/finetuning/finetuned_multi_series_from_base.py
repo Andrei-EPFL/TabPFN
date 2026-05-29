@@ -127,8 +127,8 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
         self,
         X_list: list[XType],
         y_list: list[YType],
-        X_val_list: list[XType] | None = None,
-        y_val_list: list[YType] | None = None,
+        X_val_list: list[XType],
+        y_val_list: list[YType],
         output_dir: Path | None = None
     ) -> "MultiSeriesFinetunedTabPFNRegressor":
         """Fine-tune on multiple time-series tables.
@@ -153,9 +153,10 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
                 f"got {len(X_list)} and {len(y_list)}."
             )
         
-        if (X_val_list is None) != (y_val_list is None):
+        if len(X_val_list) != len(y_val_list):
             raise ValueError(
-                "X_val_list and y_val_list must both be provided or both be None."
+                f"X_val_list and y_val_list must have the same length, "
+                f"got {len(X_val_list)} and {len(y_val_list)}."
             )
         
         if output_dir is None:
@@ -319,12 +320,12 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
                 )
                 self.X_ = X_i
                 self.y_ = y_i
-                X, y = X_validated, y_validated
-                logger.debug(f"DEBUG: X.shape={X.shape}; y.shape={y.shape}")
+                X_train, y_train = X_validated, y_validated
+                logger.debug(f"DEBUG: X_train.shape={X_train.shape}; y_train.shape={y_train.shape}")
 
                
-                X_train, X_val, y_train, y_val = self._get_train_val_split(X, y)
-                logger.debug(f"DEBUG: X_train.shape={X_train.shape}; X_val.shape={X_val.shape}")
+                # X_train, X_val, y_train, y_val = self._get_train_val_split(X, y)
+                # logger.debug(f"DEBUG: X_train.shape={X_train.shape}; X_val.shape={X_val.shape}")
 
 
                 # Calculate the context size used during finetuning.
