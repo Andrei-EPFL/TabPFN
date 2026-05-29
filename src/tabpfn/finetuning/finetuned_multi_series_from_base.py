@@ -307,7 +307,7 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
             accumulated_loss = torch.tensor(0.0, device=self.device)
             
             for idx_list, (X_i, y_i) in enumerate(zip(X_list, y_list)):
-                logger.info("Epoch %d/%d | Series %d/%d", epoch+1, self.epochs, idx_list+1, len(X_list))
+                logger.debug("DEBUG: Epoch %d/%d | Series %d/%d", epoch+1, self.epochs, idx_list+1, len(X_list))
 
                 X_validated, y_validated, self.feature_names_in_, self.n_features_in_ = (
                     ensure_compatible_fit_inputs_sklearn(
@@ -436,6 +436,12 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
                 if is_accum_step or is_last_batch:
 
                     if use_scaler:
+                        logger.debug(
+                            "GradScaler_i scale=%.1f, skipped=%s",
+                            scaler.get_scale(),
+                            scaler._found_inf_per_device(optimizer),  # internal API
+                        )
+
                         with sdpa_kernel_context():
                             scaler.scale(accumulated_loss).backward()  # type: ignore
                         scaler.unscale_(optimizer)  # type: ignore
@@ -448,6 +454,11 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
 
                         scaler.step(optimizer)  # type: ignore
                         scaler.update()  # type: ignore
+                        logger.debug(
+                            "GradScaler_f scale=%.1f, skipped=%s",
+                            scaler.get_scale(),
+                            scaler._found_inf_per_device(optimizer),  # internal API
+                        )
                     else:
                         with sdpa_kernel_context():
                             accumulated_loss.backward()
@@ -474,6 +485,9 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
                 if scheduler is not None
                 else self.learning_rate
             )
+
+            logger.info("Epoch %d/%d; LR %g", epoch+1, self.epochs, current_lr)
+
 
             _logger.log_step(
                 {
