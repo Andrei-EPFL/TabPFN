@@ -357,7 +357,7 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
             
                 # Regenerate datasets each epoch with a different random_state
                 training_splitter = partial(
-                    time_series_split,
+                    train_test_split,
                     test_size=finetuning_query_size,
                     random_state=epoch_random_state,
                 )
