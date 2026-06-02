@@ -90,6 +90,18 @@ if TYPE_CHECKING:
 MAX_VALIDATION_SAMPLES = 50_000
 
 
+def time_series_split(X, y, test_size, random_state=None, stratify=None):
+    """Temporal split: last `test_size` samples go to test (query) set."""
+    if isinstance(test_size, float):
+        n_test = int(len(X) * test_size)
+    else:
+        n_test = test_size
+
+    X_ctx, X_q = X[:-n_test], X[-n_test:]
+    y_ctx, y_q = y[:-n_test], y[-n_test:]
+    return X_ctx, X_q, y_ctx, y_q
+
+
 class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
     """Fine-tune TabPFNRegressor on a *list* of time-series tables.
 
@@ -345,7 +357,7 @@ class MultiSeriesFinetunedTabPFNRegressor(FinetunedTabPFNRegressor):
             
                 # Regenerate datasets each epoch with a different random_state
                 training_splitter = partial(
-                    train_test_split,
+                    time_series_split,
                     test_size=finetuning_query_size,
                     random_state=epoch_random_state,
                 )
